@@ -1,0 +1,62 @@
+name: Ofertas Caroca
+
+on:
+  schedule:
+    - cron: '17 11,17,23 * * *'   # ~08:17, 14:17 y 20:17 hora de Chile
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: 'normal o diagnostico'
+        type: choice
+        options: [normal, diagnostico]
+        default: normal
+
+concurrency:
+  group: ofertas-caroca
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install requests pyyaml
+
+      - name: Recuperar historial de precios
+        run: |
+          mkdir -p datos
+          if git fetch --depth=1 origin datos-precios 2>/dev/null; then
+            git show FETCH_HEAD:precios.db.gz > datos/precios.db.gz && gunzip -f datos/precios.db.gz || true
+          fi
+
+      - name: Ejecutar bot
+        env:
+          MODO: ${{ inputs.modo || 'normal' }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python bot.py
+
+      - name: Guardar historial de precios
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [ -f datos/precios.db ] || exit 0
+          gzip -kf datos/precios.db
+          TMP=$(mktemp -d)
+          cp datos/precios.db.gz "$TMP/"
+          cd "$TMP"
+          git init -q
+          git add precios.db.gz
+          git -c user.name=bot -c user.email=bot@users.noreply.github.com commit -qm "historial $(date -u +%F_%H%M)"
+          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:datos-precios
