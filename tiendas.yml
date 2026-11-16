@@ -1,0 +1,49 @@
+# ================= OFERTAS CAROCA (estilo Knasta) =================
+# Avisa solo cuando el precio de HOY está muy por debajo de lo que el producto
+# costó realmente en los últimos días (no contra el "precio normal" de la tienda).
+
+umbral_oferta: 0.40          # avisar si está 40% o más bajo su precio habitual
+umbral_error: 0.65           # 65% o más -> "POSIBLE ERROR DE PRECIO"
+min_dias_historial: 7        # días de historial antes de confiar en el precio habitual
+ventana_dias: 60             # días hacia atrás para calcular el precio habitual
+precio_minimo: 15000         # ignorar productos más baratos (CLP)
+avisar_sin_historial: false  # true = también avisa la 1a semana, comparando con el precio "normal" de la tienda
+umbral_sin_historial: 0.60
+incluir_precio_tarjeta: false  # true = considerar precios solo con tarjeta de la tienda (CMR, Ripley...)
+no_repetir_dias: 7           # no repetir el aviso de un producto salvo que baje más
+buscar_codigos: true         # revisar las páginas buscando códigos/cupones nuevos
+minutos_max: 18              # tiempo máximo por pasada (cuida tus minutos de GitHub)
+max_ofertas_correo: 40
+
+excluir: [reacondicionado, reacondicionada, refurbished, usado, usada, seminuevo, "open box", carcasa, funda, lámina]
+
+# Búsquedas para las tiendas que no entregan el catálogo completo (Falabella, Sodimac)
+busquedas: [notebook, televisor, celular, tablet, audifonos, smartwatch, consola,
+            refrigerador, lavadora, aspiradora, perfume, zapatillas, colchon, bicicleta]
+
+tiendas:
+  - nombre: Falabella
+    tipo: falabella
+    url: https://www.falabella.com/falabella-cl
+    paginas: 2
+  - nombre: Sodimac
+    tipo: falabella
+    url: https://sodimac.falabella.com/sodimac-cl
+    paginas: 1
+  # tipo auto = el bot detecta solo cómo leer la tienda (VTEX, Shopify o lector universal)
+  - {nombre: Paris,      tipo: auto, url: https://www.paris.cl}
+  - {nombre: Ripley,     tipo: auto, url: https://simple.ripley.cl}
+  - {nombre: Lider,      tipo: auto, url: https://www.lider.cl}
+  - {nombre: Hites,      tipo: auto, url: https://www.hites.com}
+  - {nombre: La Polar,   tipo: auto, url: https://www.lapolar.cl}
+  - {nombre: abcdin,     tipo: auto, url: https://www.abc.cl}
+  - {nombre: PC Factory, tipo: auto, url: https://www.pcfactory.cl}
+  - {nombre: SP Digital, tipo: auto, url: https://www.spdigital.cl}
+  - {nombre: Easy,       tipo: auto, url: https://www.easy.cl}
+  - {nombre: Jumbo,      tipo: auto, url: https://www.jumbo.cl}
+
+  # Para agregar una tienda basta con copiar una línea:
+  #  - {nombre: Mi Tienda, tipo: auto, url: https://www.mitienda.cl}
+  # Opcional: paginas_codigos: [https://www.mitienda.cl/cupones]  (páginas extra donde buscar códigos)
+  # Opcional: activa: false  (pausar una tienda)
+  # Mercado Libre no se incluye: su API exige autorización de la cuenta.
