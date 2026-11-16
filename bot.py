@@ -43,6 +43,7 @@ S.headers.update({"User-Agent": UA, "Accept-Language": "es-CL,es;q=0.9",
                   "Accept": "text/html,application/json;q=0.9,*/*;q=0.8"})
 
 CFG = {}
+DIAG = {}
 FIN_GLOBAL = INICIO + 18 * 60
 FIN_TIENDA = FIN_GLOBAL
 
@@ -58,6 +59,16 @@ DEFAULTS = {
 # ----------------------------------------------------------------- utilidades
 def log(*a):
     print(datetime.now(CHILE).strftime("%H:%M:%S"), *a, flush=True)
+
+
+def nota(t, texto):
+    DIAG.setdefault(t["id"], [])
+    if texto not in DIAG[t["id"]]:
+        DIAG[t["id"]].append(texto)
+
+
+def estado_http(r):
+    return "sin respuesta" if r is None else f"HTTP {r.status_code}"
 
 
 def quedan(seg=0):
@@ -439,6 +450,8 @@ def lector_jsonld(t, db):
     if not n or not ult or (hoy - date.fromisoformat(ult)).days >= 7:
         lst = urls_sitemap(t)
         log(f"   sitemap: {len(lst)} productos")
+        if not lst:
+            nota(t, "sitemap sin productos")
         if lst:
             db.execute("DELETE FROM urls WHERE tienda=?", (tid,))
             db.executemany("INSERT OR IGNORE INTO urls VALUES(?,?)", [(tid, u) for u in lst])
@@ -456,8 +469,12 @@ def lector_jsonld(t, db):
             return ("tiempo", None)
         r = get(u, intentos=1)
         if r is None or r.status_code != 200:
+            nota(t, f"ficha {estado_http(r)}")
             return ("ok", None)
-        return ("ok", extraer_jsonld(r.text, u))
+        p = extraer_jsonld(r.text, u)
+        if not p:
+            nota(t, "ficha sin datos de precio")
+        return ("ok", p)
 
     hechos = 0
     with ThreadPoolExecutor(t.get("hilos", 4)) as ex:
@@ -470,8 +487,266 @@ def lector_jsonld(t, db):
     estado(db, f"cursor:{tid}", (cursor + hechos) % len(todas))
 
 
-LECTORES = {"vtex": lector_vtex, "shopify": lector_shopify,
-            "falabella": lector_falabella, "jsonld": lector_jsonld}
+# ------------------------------------------------ buscador universal
+NOMBRE_K = ("productName", "displayName", "name", "nombre", "title", "product_name", "productTitle")
+PRECIO_K = ("priceRange", "sellingPrice", "salePrice", "offerPrice", "bestPrice", "finalPrice",
+            "internetPrice", "precioOferta", "precio", "price", "prices", "Price", "currentPrice",
+            "priceValue", "lowPrice", "activePrice", "specialPrice")
+LISTA_K = ("listPrice", "normalPrice", "regularPrice", "originalPrice", "oldPrice", "fullPrice",
+           "priceWithoutDiscount", "precioNormal", "compareAtPrice", "compare_at_price", "ListPrice",
+           "highPrice", "basePrice", "strikePrice")
+URL_K = ("url", "link", "href", "productUrl", "pdpUrl", "linkText", "slug", "uri", "permalink")
+ID_K = ("sku", "skuId", "productId", "itemId", "id", "code", "productReference", "partNumber")
+IMG_K = ("image", "imageUrl", "img", "thumbnail", "imagen", "images", "mediaUrls", "media")
+EAN_K = ("ean", "gtin", "gtin13", "barcode", "EAN")
+
+
+def precio_de(v, prof=0):
+    if prof > 3 or v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float, str)):
+        x = num(v)
+        return x if x and x >= 500 else None
+    if isinstance(v, dict):
+        for k in ("sellingPrice", "salePrice", "offerPrice", "bestPrice", "finalPrice", "lowPrice",
+                  "value", "amount", "price", "current", "sale", "offer", "normal", "formattedValue"):
+            if k in v:
+                x = precio_de(v[k], prof + 1)
+                if x:
+                    return x
+    if isinstance(v, list):
+        xs = [precio_de(i, prof + 1) for i in v[:6]]
+        xs = [x for x in xs if x]
+        return min(xs) if xs else None
+    return None
+
+
+def _primero(d, claves, tipos=(str,)):
+    for k in claves:
+        v = d.get(k)
+        if isinstance(v, tipos) and v not in ("", None):
+            return v
+    return None
+
+
+def candidato(d, base):
+    nombre = _primero(d, NOMBRE_K)
+    if not nombre or len(nombre) < 4:
+        return None
+    precio = None
+    for k in PRECIO_K:
+        if k in d:
+            precio = precio_de(d[k])
+            if precio:
+                break
+    if not precio or precio > 80_000_000:
+        return None
+    lista = None
+    for k in LISTA_K:
+        if k in d:
+            lista = precio_de(d[k])
+            if lista:
+                break
+    if not lista:
+        for cont in ("prices", "price", "precios", "pricing"):
+            if isinstance(d.get(cont), dict):
+                for k in LISTA_K:
+                    if k in d[cont]:
+                        lista = precio_de(d[cont][k])
+                        if lista:
+                            break
+            if lista:
+                break
+    if isinstance(d.get("priceRange"), dict):
+        lista = precio_de((d["priceRange"].get("listPrice") or {}).get("highPrice")) or lista
+    if lista and lista < precio:
+        lista = None
+    url = _primero(d, URL_K)
+    if url and d.get("linkText") == url and not url.startswith(("/", "http")):
+        url = f"/{url}/p"  # VTEX IO
+    sku = _primero(d, ID_K, (str, int))
+    if not (url or sku):
+        return None
+    img = None
+    for k in IMG_K:
+        v = d.get(k)
+        if isinstance(v, list) and v:
+            v = v[0]
+        if isinstance(v, dict):
+            v = v.get("url") or v.get("src") or v.get("imageUrl")
+        if isinstance(v, str) and v:
+            img = v
+            break
+    marca = d.get("brand") or d.get("marca")
+    if isinstance(marca, dict):
+        marca = marca.get("name")
+    stock = True
+    for k in ("available", "inStock", "isAvailable", "hasStock", "disponible", "isInStock"):
+        if k in d and d[k] in (False, 0, "false", "False"):
+            stock = False
+    if str(d.get("availability", "")).lower().endswith(("outofstock", "soldout")):
+        stock = False
+    return dict(sku=str(sku or url), nombre=unescape(nombre.strip()), marca=marca if isinstance(marca, str) else None,
+                url=urljoin(base, url or ""), imagen=urljoin(base, img) if img else None,
+                ean=_primero(d, EAN_K, (str, int)), precio=precio, lista=lista, stock=stock)
+
+
+def _recorrer(o, base, salida, prof=0):
+    if prof > 25 or len(salida) > 400:
+        return
+    if isinstance(o, dict):
+        c = candidato(o, base)
+        if c:
+            salida.append(c)
+        for v in o.values():
+            if isinstance(v, (dict, list)):
+                _recorrer(v, base, salida, prof + 1)
+    elif isinstance(o, list):
+        for v in o:
+            if isinstance(v, (dict, list)):
+                _recorrer(v, base, salida, prof + 1)
+
+
+def extraer_listado(html, base):
+    """Saca productos de una página de resultados: JSON-LD, JSON embebido y atributos data-*."""
+    bloques = []
+    for m in re.finditer(r'<script[^>]*application/ld\+json[^>]*>(.*?)</script>', html, re.S | re.I):
+        try:
+            data = json.loads(m.group(1).strip())
+        except ValueError:
+            continue
+        for prod in _productos_ld(data):
+            p = _desde_ld(prod, base)
+            if p:
+                p["url"] = urljoin(base, p["url"])
+                bloques.append(p)
+    dec = json.JSONDecoder()
+    datos = []
+    for m in re.finditer(r'<script([^>]*)>(.*?)</script>', html, re.S | re.I):
+        attrs, cuerpo = m.group(1), m.group(2).strip()
+        if not cuerpo or "ld+json" in attrs:
+            continue
+        if "json" in attrs.lower() or "__NEXT_DATA__" in attrs:
+            try:
+                datos.append(json.loads(cuerpo))
+                continue
+            except ValueError:
+                pass
+        for a in re.finditer(r'=\s*(\{|\[)', cuerpo):
+            if len(datos) > 40:
+                break
+            try:
+                obj, _ = dec.raw_decode(cuerpo[a.start(1):])
+            except ValueError:
+                continue
+            if isinstance(obj, (dict, list)) and len(str(obj)) > 200:
+                datos.append(obj)
+    for m in re.finditer(r'data-[\w-]+=(["\'])(\{.*?\})\1', html, re.S):
+        try:
+            datos.append(json.loads(unescape(m.group(2))))
+        except ValueError:
+            continue
+    for d in datos:
+        _recorrer(d, base, bloques)
+    vistos, unicos = set(), []
+    for p in bloques:
+        k = p.get("sku") or p.get("url")
+        if k not in vistos:
+            vistos.add(k)
+            unicos.append(p)
+    return unicos
+
+
+BUSQUEDAS_GENERICAS = [
+    "{base}/search?q={q}", "{base}/busqueda?q={q}", "{base}/buscar?q={q}",
+    "{base}/search/?text={q}", "{base}/{q}?_q={q}&map=ft", "{base}/busqueda?ft={q}",
+    "{base}/catalogsearch/result/?q={q}", "{base}/search/{q}",
+]
+
+
+def lector_buscador(t, db):
+    """Lector universal por búsquedas: abre la página de resultados y extrae los productos."""
+    base = t["url"].rstrip("/")
+    consultas = t.get("busquedas") or CFG["busquedas"]
+    propias = t.get("buscar_url")
+    propias = [propias] if isinstance(propias, str) else list(propias or [])
+    guardada = estado(db, f"plantilla:{t['id']}")
+    plantillas = propias + ([guardada] if guardada else []) + BUSQUEDAS_GENERICAS
+    plantillas = list(dict.fromkeys(plantillas))
+    elegida = None
+    for pl in plantillas:  # buscar una plantilla que funcione con la primera búsqueda
+        if not quedan(20):
+            return
+        u = pl.format(base=base, q=quote_plus(consultas[0]), page=1)
+        r = get(u, intentos=1)
+        if r is None or r.status_code != 200:
+            nota(t, f"búsqueda {estado_http(r)}")
+            continue
+        prods = extraer_listado(r.text, u)
+        if prods:
+            elegida = pl
+            estado(db, f"plantilla:{t['id']}", pl)
+            yield from prods
+            break
+        nota(t, "búsqueda sin productos legibles")
+    if not elegida:
+        return
+    pags = t.get("paginas", 2) if "{page}" in elegida else 1
+    for i, q in enumerate(consultas):
+        for pg in range(1, pags + 1):
+            if (i, pg) == (0, 1):
+                continue
+            if not quedan():
+                return
+            u = elegida.format(base=base, q=quote_plus(q), page=pg)
+            r = get(u)
+            if r is None or r.status_code != 200:
+                break
+            prods = extraer_listado(r.text, u)
+            if not prods:
+                break
+            yield from prods
+            time.sleep(0.7)
+
+
+def es_shopify(t):
+    r = get(t["url"].rstrip("/") + "/products.json", {"limit": 1}, intentos=1)
+    return r is not None and r.status_code == 200 and '"products"' in r.text[:300]
+
+
+def es_vtex(t):
+    r = get(t["url"].rstrip("/") + "/api/catalog_system/pub/products/search", {"_from": 0, "_to": 0}, intentos=1)
+    if r is not None and r.status_code not in (200, 206, 404):
+        nota(t, f"api {estado_http(r)}")
+    return r is not None and r.status_code in (200, 206) and r.text.lstrip().startswith("[{")
+
+
+def lector_auto(t, db):
+    """Prueba cada forma de lectura y recuerda la que funciona."""
+    clave = f"tipo2:{t['id']}"
+    orden = ["shopify", "vtex", "buscador", "jsonld"]
+    previo = estado(db, clave)
+    if previo in orden and MODO != "diagnostico":
+        orden = [previo] + [o for o in orden if o != previo]
+    for tipo in orden:
+        if not quedan(20):
+            return
+        if tipo == "shopify" and not es_shopify(t):
+            continue
+        if tipo == "vtex" and not es_vtex(t):
+            continue
+        n = 0
+        for p in LECTORES[tipo](t, db):
+            n += 1
+            t["_tipo"] = tipo
+            yield p
+        if n:
+            estado(db, clave, tipo)
+            return
+
+
+LECTORES = {"vtex": lector_vtex, "shopify": lector_shopify, "falabella": lector_falabella,
+            "jsonld": lector_jsonld, "buscador": lector_buscador, "auto": lector_auto}
 
 
 def detectar(t, db, forzar=False):
@@ -617,8 +892,6 @@ def main():
             continue
         FIN_TIENDA = time.time() + max(60, (FIN_GLOBAL - time.time()) / (len(tiendas) - i))
         tipo = t.get("tipo", "auto")
-        if tipo == "auto":
-            tipo = detectar(t, db, forzar=MODO == "diagnostico")
         log(f"== {t['nombre']} ({tipo})")
         n, err, vistos = 0, None, set()
         try:
@@ -650,9 +923,9 @@ def main():
             log("   ERROR", err)
         db.commit()
         if n == 0 and not err:
-            err = "no se pudo leer (bloqueo o formato distinto)"
-        log(f"   {n} productos")
-        resumen.append((t["nombre"], tipo, n, err))
+            err = "no se pudo leer: " + (", ".join(DIAG.get(t["id"], [])[:4]) or "sin datos")
+        log(f"   {n} productos", DIAG.get(t["id"], []))
+        resumen.append((t["nombre"], t.get("_tipo", tipo), n, err))
 
     for o in ofertas:
         o["otras"] = [x for x in otras_tiendas(db, o["pid"], o.get("ean"), hoy) if x[1] < o["precio"] * 1.5]

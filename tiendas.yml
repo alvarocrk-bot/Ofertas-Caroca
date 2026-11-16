@@ -30,14 +30,14 @@ tiendas:
     tipo: falabella
     url: https://sodimac.falabella.com/sodimac-cl
     paginas: 1
-  # tipo auto = el bot detecta solo cómo leer la tienda (VTEX, Shopify o lector universal)
-  - {nombre: Paris,      tipo: auto, url: https://www.paris.cl}
+  # tipo auto = el bot prueba solo: Shopify, VTEX, buscador universal y sitemap, y recuerda el que funciona
+  - {nombre: Paris,      tipo: auto, url: https://www.paris.cl, buscar_url: "{base}/search/?q={q}"}
   - {nombre: Ripley,     tipo: auto, url: https://simple.ripley.cl}
-  - {nombre: Lider,      tipo: auto, url: https://www.lider.cl}
-  - {nombre: Hites,      tipo: auto, url: https://www.hites.com}
+  - {nombre: Lider,      tipo: jsonld, url: https://www.lider.cl}
+  - {nombre: Hites,      tipo: jsonld, url: https://www.hites.com}
   - {nombre: La Polar,   tipo: auto, url: https://www.lapolar.cl}
   - {nombre: abcdin,     tipo: auto, url: https://www.abc.cl}
-  - {nombre: PC Factory, tipo: auto, url: https://www.pcfactory.cl}
+  - {nombre: PC Factory, tipo: auto, url: https://www.pcfactory.cl, buscar_url: "{base}/buscar?valor={q}"}
   - {nombre: SP Digital, tipo: auto, url: https://www.spdigital.cl}
   - {nombre: Easy,       tipo: auto, url: https://www.easy.cl}
   - {nombre: Jumbo,      tipo: auto, url: https://www.jumbo.cl}
